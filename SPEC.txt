@@ -1,0 +1,37 @@
+# Specification: TypeScript/Node.js Azure Zendesk integration + AI ticket agent
+
+## 1. Project Overview
+
+**Project:** TypeScript/Node.js Azure Zendesk integration + AI ticket agent
+**GitHub Repo:** https://github.com/9KMan/JOB-20260506142612-000007
+
+## 2. Technical Stack
+
+TypeScript · Node.js · Python · Azure Functions · Table Storage · Zendesk · webhook
+
+## 3. Architecture
+
+TODO: Define architecture based on job requirements.
+
+## 4. Key Components
+
+TODO: List key components based on job requirements.
+
+## 5. Deliverables
+
+- [ ] Core backend API
+- [ ] Frontend application
+- [ ] Database models
+- [ ] Tests
+- [ ] README documentation
+- [ ] Docker deployment
+
+## 6. Milestones
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| 1 | Core implementation | Week 1-2 |
+| 2 | Features | Week 3-4 |
+| 3 | Testing & deployment | Week 5-6 |
+
+**GitHub Repo:** https://github.com/9KMan/JOB-20260506142612-000007
