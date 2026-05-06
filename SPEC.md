@@ -1,0 +1,299 @@
+# Specification: Upwork — Backend Integration Developer (TypeScript/Zendesk/Azure/AI Agent)
+
+## 1. Project Overview
+
+**Client:** Upwork — Backend Integration Developer
+**GitHub Repo:** https://github.com/9KMan/JOB-20260506142612-000007
+**Tier:** MICRO
+**Budget:** $15-30/hr × 30hrs/week × 3-6 months
+**Rate:** $30/hr
+**Source:** https://www.upwork.com/jobs/Backend-Integration-Developer-TypeScript-Zendesk-Azure-Automation_~022051922129195798113/
+
+## 2. Problem Statement
+
+The client has a production TypeScript/Node.js system that:
+1. Inserts rows into **Azure Table Storage** → triggers **Azure Function** → creates **Zendesk tickets**
+2. Needs more reliable event handling, retries, and observability
+3. Needs 3 new external API integrations: **Cradlepoint**, **Peplink**, **Starlink**
+4. Needs an **AI agent** to automatically triage and resolve Zendesk tickets
+
+## 3. Technical Stack
+
+| Component | Technology |
+|-----------|------------|
+| Runtime | Node.js 20 LTS, TypeScript 5.x |
+| Azure Functions | TypeScript runtime, Durable Functions |
+| NoSQL Storage | Azure Table Storage |
+| Ticketing | Zendesk API v2 |
+| Network APIs | Cradlepoint REST, Peplink REST, Starlink REST |
+| AI | OpenAI GPT-4o or Anthropic Claude, DSPy |
+| Observability | Application Insights |
+| Testing | Jest + Supertest |
+| Deployment | Azure CLI, GitHub Actions |
+
+## 4. Proposed Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         AZURE FUNCTION (Event Grid Trigger)              │
+│  TypeScript/Node.js — Durable Function with singleton orchestration       │
+│  Trigger: Azure Event Grid subscription on Table Storage dataChange        │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │
+               ┌───────────────────┼────────────────────┐
+               ▼                   ▼                    ▼
+        ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐
+        │ ZendeskBridge│   │DeviceAPIClient│  │ TicketAI (LLM Agent)    │
+        │              │   │              │  │                          │
+        │ createTicket │   │Cradlepoint   │  │ analyze() → classify     │
+        │ updateTicket │   │Peplink       │  │ resolve() → auto-close  │
+        │ closeTicket │   │Starlink      │  │ escalate() → human      │
+        └──────┬───────┘   └──────┬───────┘  └──────────┬──────────────┘
+               │                  │                      │
+               ▼                  ▼                      ▼
+        ┌──────────────┐   ┌──────────────────────────────────────────┐
+        │  Zendesk API │   │         Orchestration Logic              │
+        └──────────────┘   │  event.type → route → action             │
+                           └──────────────────────────────────────────┘
+
+External Services:
+  • Zendesk: tickets API + webhooks (outbound)
+  • Cradlepoint:  REST + OAuth2 client credentials
+  • Peplink:      REST + API key (X-Peplink-Key header)
+  • Starlink:     REST + Bearer token
+
+Observability:
+  • Application Insights: request tracing, custom events, metrics
+  • Structured JSON logging throughout
+```
+
+## 5. Core Components
+
+### 5.1 EventIngestion (Azure Event Grid Trigger)
+
+**File:** `src/functions/event-ingestion.ts`
+
+```
+Responsibilities:
+- Receive Event Grid events on Azure Table Storage inserts
+- Validate event payload (partitionKey, rowKey, timestamp)
+- Emit orchestration trigger with idempotency key
+- Dead-letter to queue on validation failure
+
+Idempotency: hash(partitionKey + rowKey + eventType) → stored in Table Storage
+Retry: exponential backoff 1s → 2s → 4s → 8s → 16s (max 5 attempts)
+```
+
+### 5.2 OrchestrationFunction (Durable Functions)
+
+**File:** `src/functions/orchestration.ts`
+
+```
+Responsibilities:
+- Singleton orchestrator per deviceId (prevent concurrent processing)
+- Route event to correct handler based on event type
+- Coordinate: ticket creation → AI analysis → action → close
+
+Event types:
+  DEVICE_ALERT     → create ticket + AI triage → resolve/escalate
+  DEVICE_OFFLINE   → create ticket + AI triage → resolve/escalate
+  DEVICE_CONFIG    → create ticket + AI triage → resolve/escalate
+  MANUAL_SYNC      → skip AI, direct ticket create
+```
+
+### 5.3 ZendeskBridge
+
+**File:** `src/services/zendesk.ts`
+
+```
+Responsibilities:
+- createTicket(event) → Zendesk ticket ID
+- updateTicket(ticketId, updates)
+- closeTicket(ticketId, resolution)
+- getTicket(ticketId)
+- Post webhook outbound for ticket updates
+
+Zendesk fields:
+  subject: "{DeviceType} - {AlertType} - {DeviceId}"
+  description: formatted event payload
+  priority: mapped from severity
+  tags: [deviceType, alertType, region]
+```
+
+### 5.4 DeviceAPIClient
+
+**File:** `src/services/device-api.ts`
+
+```
+Responsibilities:
+- Unified interface for Cradlepoint/Peplink/Starlink
+- Auth management (OAuth2 token refresh, API key rotation)
+- Health check per device
+- Rate limiting (100 req/min per provider)
+
+Cradlepoint:
+  Base URL: https://<customer>.cpcloud.io/api/v1
+  Auth: OAuth2 client credentials
+  Endpoints: /devices, /networks, /alerts
+
+Peplink:
+  Base URL: https://<customer>.peplink.com/api/
+  Auth: X-Peplink-Key header
+  Endpoints: /router, /status, /connection
+
+Starlink:
+  Base URL: https://api.starlink.com
+  Auth: Bearer token
+  Endpoints: /v1/devices, /v1/status
+```
+
+### 5.5 TicketAI (LLM Agent)
+
+**File:** `src/services/ticket-ai.ts`
+
+```
+Responsibilities:
+- analyze(ticket) → { category, severity, recommendedAction, confidence }
+- resolve(ticketId, action) → apply resolution
+- escalate(ticketId, reason) → flag for human review
+
+DSPy Signature:
+  ticket_description → { category, severity, action: resolve|escalate|wait, confidence: 0-1 }
+
+Rules engine (deterministic fallback):
+  - "offline" + "Starlink" → auto-resolve (known outage)
+  - "offline" + "Cradlepoint" → escalate (cellular failover needed)
+  - any "error" + confidence < 0.7 → escalate
+  - routine_status + confidence > 0.9 → auto-resolve
+```
+
+### 5.6 RetryQueue (Dead Letter Handling)
+
+**File:** `src/services/retry-queue.ts`
+
+```
+Responsibilities:
+- Store failed events with retry metadata
+- Process retries with exponential backoff
+- Alert on max retry exceeded
+- Manual replay endpoint
+
+Storage: Azure Table Storage (same partition as main events)
+Max retries: 5
+Backoff: 1s → 2s → 4s → 8s → 16s
+After max retries: move to deadLetter table + alert
+```
+
+### 5.7 AuthManager
+
+**File:** `src/services/auth.ts`
+
+```
+Responsibilities:
+- OAuth2 token lifecycle (Cradlepoint)
+- API key validation and rotation
+- Secure storage in Azure Key Vault
+
+Cradlepoint OAuth2:
+  Token URL: https://<customer>.cpcloud.io/oauth/token
+  Scopes: devices:read alerts:read
+  Auto-refresh: 5 min before expiry
+```
+
+## 6. Data Models
+
+### 6.1 Event Payload (from Table Storage)
+
+```typescript
+interface DeviceEvent {
+  partitionKey: string;      // deviceId
+  rowKey: string;            // eventId (ULID)
+  timestamp: string;         // ISO 8601
+  eventType: EventType;      // DEVICE_ALERT | DEVICE_OFFLINE | DEVICE_CONFIG | MANUAL_SYNC
+  deviceType: DeviceType;   // Cradlepoint | Peplink | Starlink
+  severity: Severity;        // Critical | High | Medium | Low
+  payload: {
+    alertCode?: string;
+    message: string;
+    metadata?: Record<string, unknown>;
+  };
+  _etag: string;
+}
+```
+
+### 6.2 Ticket Record
+
+```typescript
+interface TicketRecord {
+  ticketId: string;           // Zendesk ticket ID
+  eventId: string;            // rowKey from event
+  deviceId: string;           // partitionKey
+  status: TicketStatus;       // open | pending | solved | closed
+  aiResult?: AIAgentResult;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+}
+```
+
+## 7. Error Handling Strategy
+
+```
+Layer 1: Event Grid → Function (at-most-once delivery)
+  → Idempotent processing via event ID dedup
+
+Layer 2: Function → Zendesk / Device APIs
+  → Try/catch with retry queue on failure
+
+Layer 3: Retry Queue → Final retry
+  → Exponential backoff, max 5 attempts
+
+Layer 4: Dead Letter → Alert + Manual intervention
+  → Application Insights alert
+  → Webhook to ops channel
+```
+
+## 8. Testing Strategy
+
+```
+Unit Tests (Jest):
+  - ZendeskBridge: ticket creation, update, dedup logic
+  - DeviceAPIClient: auth refresh, response parsing
+  - TicketAI: classification accuracy, rules fallback
+  - RetryQueue: backoff timing, dead letter trigger
+
+Integration Tests:
+  - Full event → ticket flow (mocked Zendesk + Device APIs)
+  - OAuth2 token refresh flow
+  - Retry queue replay
+
+E2E Tests:
+  - Azure Event Grid → Function → Zendesk (real or sandbox)
+```
+
+## 9. Deployment
+
+```
+GitHub Actions CI/CD:
+  1. lint + typecheck (pr)
+  2. unit tests (pr + merge)
+  3. integration tests (merge to main only)
+  4. deploy to Azure (manual approval)
+
+Azure Resources (IaC via ARM/Bicep):
+  - Azure Function App (Consumption plan)
+  - Azure Event Grid subscription
+  - Azure Table Storage account
+  - Application Insights
+  - Azure Key Vault (secrets)
+```
+
+## 10. Milestones
+
+| Phase | Deliverables | Duration |
+|-------|-------------|----------|
+| 1 | Stable Azure→Zendesk pipeline (retries, logging, dedup) | Week 1-2 |
+| 2 | Cradlepoint + Peplink API integrations | Week 3-4 |
+| 3 | Starlink API integration | Week 5 |
+| 4 | AI ticket triage agent (LLM + DSPy rules) | Week 6-8 |
+| 5 | Full test coverage + docs + CI/CD | Week 9-10 |
